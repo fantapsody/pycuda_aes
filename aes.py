@@ -3,7 +3,7 @@ import pycuda.driver as cuda
 import pycuda.autoinit
 from pycuda.compiler import SourceModule
 import numpy
-import array, time, math
+import array, time, math, numpy
 
 
 class AES:
@@ -29,15 +29,16 @@ class AES:
 	blockMax = 1024
 	cuda_buf_size = 16 * blockMax * threadMax
 
-	def __init__(self, key, framesize = 1024):
+	def __init__(self, key, threadMax = 1024, blockMax = 1024):
 		self.key = key
-		self.framesize = framesize
+		self.threadMax = threadMax
+		self.blockMax = blockMax
 
 		self.expandKey()
 		self.gen_tbox()
 
 	def gen_tbox(self):
-		self.Te = [array.array('I', [0] * 256) for i in xrange(4)]
+		self.Te = [numpy.zeros(256, numpy.uint32) for i in xrange(4)]
 		d = bytearray(256)
 
 		for i in xrange(128):
@@ -69,7 +70,7 @@ class AES:
 		ks = bytearray((len(self.key) / 4 + 7) * 16)
 		ks[0 : 16] = self.key
 
-		self.keySchedule = [0] * 4 * (len(self.key) / 4 + 7)
+		self.keySchedule = numpy.zeros(4 * (len(self.key) / 4 + 7), numpy.uint32)
 
 		rcon = 1
 
@@ -84,7 +85,6 @@ class AES:
 				ks[i + j] = ks[i + j - len(self.key)] ^ temp[j]
 		for i in xrange(len(ks) / 16):
 			self.keySchedule[i * 4 : (i + 1) * 4] = (self.byte2word(ks[i * 16 : i * 16 + 4]), self.byte2word(ks[i * 16 + 4 : i * 16 + 8]), self.byte2word(ks[i * 16 + 8 : i * 16 + 12]), self.byte2word(ks[i * 16 + 12 : i * 16 + 16]))
-		self.keySchedule = array.array('I', self.keySchedule)
 
 	def printKeySchedule(self):
 		for i in xrange(0, len(self.keySchedule)):
@@ -229,7 +229,7 @@ __global__ void encrypt(unsigned char* in){
 		dKeySchedule = mod.get_global("keySchedule")[0]
 		cuda.memcpy_htod(dKeySchedule, self.keySchedule)
 		dThreadMax = mod.get_global("threadMax")[0]
-		cuda.memcpy_htod(dThreadMax, array.array('I', [self.threadMax]))
+		cuda.memcpy_htod(dThreadMax, numpy.array([self.threadMax], numpy.uint32))
 		self.dLength = mod.get_global('length')[0]
 
 		dTe0 = mod.get_global("Te0")[0]
@@ -264,25 +264,38 @@ __global__ void encrypt(unsigned char* in){
 		# printKS = self.mod.get_function("printKeySchedule")
 		# printKS(block = (1, 1, 1))
 
-		cuda.memcpy_htod(self.dLength, array.array('I', [len(pt)]))
 
-		cuda.memcpy_htod(self.cuda_buf, pt)
 
 		enc = self.mod.get_function("encrypt");
+		ct = numpy.zeros(len(pt), dtype = numpy.ubyte)
 
-		for i in xrange(int(math.ceil(float(len(pt)) / self.batchMax))):
-			blocks = len(pt) / 16
-			bl = self.blockMax
-			gl = 1
-			if blocks > self.blockMax:
-				gl = int(math.ceil(float(blocks) / self.blockMax))
+		start = 0
+		remain = len(pt)
+
+		while remain > 0:
+			threadNum = self.blockMax
+			blockNum = 1
+			if remain >= self.batchMax:
+				dispose = self.batchMax
+				blockNum = self.blockMax
+				threadNum = self.threadMax
+			elif remain > self.blockMax * 16:
+				blockNum = int(math.ceil(float(remain / 16) / self.threadMax))
+				threadm = self.threadMax
+				dispose = remain
 			else:
-				bl = blocks
-			enc(self.cuda_buf, block = (bl, 1, 1), grid = (gl, 1));
+				threadNum = remain / 16
+				dispose = remain
+			remain -= dispose
 
-		ct = array.array('B', bytearray(len(pt)))
-		cuda.memcpy_dtoh(ct, self.cuda_buf)
+			cuda.memcpy_htod(self.cuda_buf, pt[start : start + dispose])
+			cuda.memcpy_htod(self.dLength, numpy.array([dispose], numpy.uint32))
+			enc(self.cuda_buf, block = (threadNum, 1, 1), grid = (blockNum, 1))
+			cuda.memcpy_dtoh(ct[start : start + dispose], self.cuda_buf)
 
+			start += dispose
+
+			
 		return ct
 
 
@@ -335,7 +348,7 @@ class TestCUDAAES(unittest.TestCase):
 		key = bytearray(16)
 		for i in xrange(16):
 			key[i] = i
-		aes = AES(key)
+		aes = AES(key, 4)
 
 		bs = 1024
 		pt = numpy.random.bytes(bs)
@@ -347,10 +360,8 @@ class TestCUDAAES(unittest.TestCase):
 		 	self.assertEqual(ct1[i], ct2[i])
 
 	def test_benchmark(self):
-		key = bytearray(16)
-		for i in xrange(16):
-			key[i] = i
-		aes = AES(key)
+		key = numpy.random.bytes(16)
+		aes = AES(key, 1024, 1024)
 
 		for i in xrange(17):
 			bs = 16 * pow(2, i)
@@ -359,7 +370,7 @@ class TestCUDAAES(unittest.TestCase):
 			pt = numpy.random.bytes(bs)
 
 			s = time.clock()
-			aes.basic_encrypt(pt)
+			# aes.basic_encrypt(pt)
 			e = time.clock()
 			print "basic: %f" % (e - s)
 
