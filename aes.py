@@ -267,7 +267,7 @@ __global__ void encrypt(unsigned char* in){
 
 
 		enc = self.mod.get_function("encrypt");
-		ct = numpy.zeros(len(pt), dtype = numpy.ubyte)
+		ct = numpy.empty(len(pt), dtype = numpy.ubyte)
 
 		start = 0
 		remain = len(pt)
@@ -290,9 +290,11 @@ __global__ void encrypt(unsigned char* in){
 
 			cuda.memcpy_htod(self.cuda_buf, pt[start : start + dispose])
 			cuda.memcpy_htod(self.dLength, numpy.array([dispose], numpy.uint32))
-			enc(self.cuda_buf, block = (threadNum, 1, 1), grid = (blockNum, 1))
-			cuda.memcpy_dtoh(ct[start : start + dispose], self.cuda_buf)
 
+			enc(self.cuda_buf, block = (threadNum, 1, 1), grid = (blockNum, 1))
+
+			cuda.memcpy_dtoh(ct[start : start + dispose], self.cuda_buf)
+			
 			start += dispose
 
 			
@@ -361,7 +363,7 @@ class TestCUDAAES(unittest.TestCase):
 
 	def test_benchmark(self):
 		key = numpy.random.bytes(16)
-		aes = AES(key, 1024, 1024)
+		aes = AES(key)
 
 		for i in xrange(17):
 			bs = 16 * pow(2, i)
